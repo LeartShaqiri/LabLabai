@@ -3,35 +3,26 @@ import { GoogleGenerativeAI } from '@google/generative-ai'
 
 // Configure route for file uploads
 export const runtime = 'nodejs'
-export const maxDuration = 30
+export const maxDuration = 60
 
-// Initialize Gemini client safely
+// Determine which AI provider to use
+function getAIProvider() {
+  const provider = process.env.AI_PROVIDER || 'gemini'
+  
+  return {
+    provider,
+    geminiApiKey: process.env.GEMINI_API_KEY,
+    ollamaUrl: process.env.OLLAMA_URL || 'http://localhost:11434',
+    groqApiKey: process.env.GROQ_API_KEY,
+  }
+}
+
+// Initialize Gemini client
 function getGeminiClient() {
   const apiKey = process.env.GEMINI_API_KEY
   
   if (!apiKey) {
-    // Check if it might be in a different variable name
-    const altKey = process.env.GOOGLE_API_KEY || process.env.GEMINI_KEY
-    
-    if (altKey) {
-      console.warn('Found API key in alternative variable. Using it, but GEMINI_API_KEY is recommended.')
-      return new GoogleGenerativeAI(altKey)
-    }
-    
-    const errorMsg = `Gemini API key is not configured. 
-Please create a .env.local file in the root directory with:
-GEMINI_API_KEY=your_api_key_here
-
-Then restart your dev server (npm run dev).
-
-Get your API key from: https://makersuite.google.com/app/apikey`
-    
-    throw new Error(errorMsg)
-  }
-  
-  // Validate API key format (Gemini keys typically start with "AIza")
-  if (apiKey.length < 30 || (!apiKey.startsWith('AIza') && process.env.NODE_ENV === 'development')) {
-    console.warn('Warning: API key format may be incorrect. Gemini API keys typically start with "AIza"')
+    throw new Error('GEMINI_API_KEY is not configured in .env.local')
   }
   
   return new GoogleGenerativeAI(apiKey)
@@ -39,17 +30,7 @@ Get your API key from: https://makersuite.google.com/app/apikey`
 
 export async function POST(request: NextRequest) {
   try {
-    // Check for API key and initialize client
-    let genAI
-    try {
-      genAI = getGeminiClient()
-    } catch (initError: any) {
-      return NextResponse.json(
-        { error: initError.message || 'Failed to initialize Gemini client' },
-        { status: 500 }
-      )
-    }
-
+    const config = getAIProvider()
     let formData
     try {
       formData = await request.formData()
@@ -70,7 +51,7 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // Prepare prompt for Gemini
+    // Prepare prompt
     const systemPrompt = `You are an expert code debugging assistant. When given code or error messages, you should:
 1. Identify the error clearly
 2. Explain why the error occurred
@@ -84,43 +65,19 @@ Respond with a JSON object containing these exact keys:
 - fixedCode: The corrected code (if applicable, otherwise explain the fix)
 
 Example format:
-{"errorExplanation":"...","reasoning":"...","fixedCode":"..."}
+{"errorExplanation":"...","reasoning":"...","fixedCode":"..."}`
 
-If the input is an image, analyze it carefully for code or error messages.`
-
-    // Get the model - try different model name formats
-    const hasImage = file && file.type.startsWith('image/')
-    
-    // Try model names in order of preference
-    // Some API keys may have different model names available
-    const modelNamesToTry = [
-      'gemini-1.5-flash',
-      'gemini-1.5-pro', 
-      'gemini-pro',
-    ]
-    
-    // Start with the first model
-    let currentModelIndex = 0
-    let model = genAI.getGenerativeModel({ 
-      model: modelNamesToTry[currentModelIndex],
-      generationConfig: {
-        temperature: 0.3,
-      },
-    })
-    let modelName = modelNamesToTry[currentModelIndex]
-
-    // Build the prompt
-    let userPrompt = systemPrompt + '\n\n'
+    let userPrompt = ''
     const parts: any[] = []
-
-    // Handle file upload (image or text file)
+    
+    // Handle file upload
     if (file) {
       try {
         const fileType = file.type || 'application/octet-stream'
         const fileContent = await file.arrayBuffer()
         const buffer = Buffer.from(fileContent)
 
-        // Check file size (limit to 10MB for images, 1MB for text)
+        // Check file size
         const maxSize = fileType.startsWith('image/') ? 10 * 1024 * 1024 : 1024 * 1024
         if (buffer.length > maxSize) {
           return NextResponse.json(
@@ -132,20 +89,17 @@ If the input is an image, analyze it carefully for code or error messages.`
         if (fileType.startsWith('image/')) {
           // For images, add to parts array for multimodal input
           const base64Image = buffer.toString('base64')
-          const mimeType = fileType
-
           parts.push({
             inlineData: {
               data: base64Image,
-              mimeType: mimeType,
+              mimeType: fileType,
             },
           })
-
-          userPrompt += 'Please analyze this image for code errors. Identify any errors, explain why they occurred, and provide fixed code if applicable. Respond in JSON format with errorExplanation, reasoning, and fixedCode fields.'
+          userPrompt = 'Please analyze this image for code errors. Identify any errors, explain why they occurred, and provide fixed code if applicable. Respond in JSON format with errorExplanation, reasoning, and fixedCode fields.'
         } else {
           // Handle text files
           const textContent = buffer.toString('utf-8')
-          userPrompt += `Please analyze this code for errors:\n\n${textContent}\n\nIdentify any errors, explain why they occurred, and provide fixed code. Respond in JSON format with errorExplanation, reasoning, and fixedCode fields.`
+          userPrompt = `Please analyze this code for errors:\n\n${textContent}\n\nIdentify any errors, explain why they occurred, and provide fixed code. Respond in JSON format with errorExplanation, reasoning, and fixedCode fields.`
         }
       } catch (fileError: any) {
         return NextResponse.json(
@@ -157,129 +111,157 @@ If the input is an image, analyze it carefully for code or error messages.`
 
     // Handle code input
     if (code && code.trim()) {
-      userPrompt += `Please analyze this code for errors:\n\n${code}\n\nIdentify any errors, explain why they occurred, and provide fixed code. Respond in JSON format with errorExplanation, reasoning, and fixedCode fields.`
+      userPrompt = `Please analyze this code for errors:\n\n${code}\n\nIdentify any errors, explain why they occurred, and provide fixed code. Respond in JSON format with errorExplanation, reasoning, and fixedCode fields.`
     }
 
-    // Add text prompt to parts (always add text at the end)
-    parts.push({ text: userPrompt })
+    // Add text prompt to parts
+    if (userPrompt) {
+      parts.push({ text: `${systemPrompt}\n\n${userPrompt}` })
+    }
 
-    // Call Gemini API - try different models if one fails
-    let response
-    let lastError: any = null
-    
-    for (let attempt = 0; attempt < modelNamesToTry.length; attempt++) {
-      try {
-        const result = await model.generateContent(parts)
-        response = result.response
-        break // Success, exit the loop
-      } catch (geminiError: any) {
-        lastError = geminiError
-        const errorMessage = geminiError?.message || 'Gemini API error'
+    // Route to appropriate AI provider
+    let content: string
+
+    try {
+      if (config.provider === 'gemini' && config.geminiApiKey) {
+        // Use Gemini 2.5 Flash (free tier available)
+        const genAI = getGeminiClient()
+        const hasImage = file && file.type.startsWith('image/')
         
-        // If it's a 404 (model not found), try the next model
-        if ((errorMessage.includes('not found') || errorMessage.includes('404')) && attempt < modelNamesToTry.length - 1) {
-          currentModelIndex++
-          modelName = modelNamesToTry[currentModelIndex]
-          model = genAI.getGenerativeModel({ 
-            model: modelName,
-            generationConfig: {
-              temperature: 0.3,
-            },
-          })
-          continue // Try next model
-        }
-        
-        // If it's not a 404 or we've tried all models, return error
-        const errorStatus = geminiError?.status || 500
-        
-        // Provide helpful message for model not found errors
-        let helpfulMessage = errorMessage
-        if (errorMessage.includes('not found') || errorMessage.includes('404')) {
-          helpfulMessage = `None of the available Gemini models worked with your API key.
-          
-Tried models: ${modelNamesToTry.join(', ')}
-
-This usually means:
-1. Your API key doesn't have access to these models
-2. The Generative Language API is not enabled in your Google Cloud project
-3. Your API key may be restricted
-
-Please:
-- Check your API key at: https://makersuite.google.com/app/apikey
-- Enable "Generative Language API" in Google Cloud Console
-- Verify your API key has the correct permissions
-
-Original error: ${errorMessage}`
-        }
-
-        return NextResponse.json(
-          {
-            error: `Gemini API error: ${helpfulMessage}`,
-            details: process.env.NODE_ENV === 'development' ? geminiError?.stack : undefined,
+        // Use gemini-2.5-flash as per documentation
+        const model = genAI.getGenerativeModel({ 
+          model: 'gemini-2.5-flash',
+          generationConfig: {
+            temperature: 0.3,
           },
-          { status: errorStatus >= 400 && errorStatus < 600 ? errorStatus : 500 }
-        )
+        })
+
+        const result = await model.generateContent(parts)
+        const response = result.response
+        content = response.text()
+      } else if (config.provider === 'ollama') {
+        // Use Ollama (local, free)
+        const fullPrompt = `${systemPrompt}\n\n${userPrompt}`
+        const response = await fetch(`${config.ollamaUrl}/api/generate`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model: 'llama3.2:3b',
+            prompt: fullPrompt,
+            stream: false,
+            options: { temperature: 0.3 },
+          }),
+        })
+
+        if (!response.ok) {
+          throw new Error(`Ollama API error: ${response.statusText}. Make sure Ollama is running: https://ollama.ai`)
+        }
+
+        const data = await response.json()
+        content = data.response || ''
+      } else if (config.provider === 'groq' && config.groqApiKey) {
+        // Use Groq (free API, very fast)
+        const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${config.groqApiKey}`,
+          },
+          body: JSON.stringify({
+            model: 'llama-3.1-8b-instant',
+            messages: [
+              { role: 'system', content: systemPrompt },
+              { role: 'user', content: userPrompt },
+            ],
+            temperature: 0.3,
+            response_format: { type: 'json_object' },
+          }),
+        })
+
+        if (!response.ok) {
+          const errorData = await response.json().catch(() => ({}))
+          throw new Error(`Groq API error: ${errorData.error?.message || response.statusText}`)
+        }
+
+        const data = await response.json()
+        content = data.choices[0]?.message?.content || ''
+      } else {
+        // Default: Try Gemini
+        if (!config.geminiApiKey) {
+          throw new Error('No AI provider configured. Please set GEMINI_API_KEY or choose another provider.')
+        }
+        const genAI = getGeminiClient()
+        const model = genAI.getGenerativeModel({ 
+          model: 'gemini-2.5-flash',
+          generationConfig: { temperature: 0.3 },
+        })
+        const result = await model.generateContent(parts)
+        content = result.response.text()
       }
-    }
-    
-    if (!response) {
+
+      if (!content) {
+        throw new Error('No response from AI')
+      }
+
+      // Parse JSON response
+      let result
+      try {
+        result = JSON.parse(content)
+      } catch (parseError) {
+        // If JSON parsing fails, try to extract JSON from markdown code blocks
+        const jsonMatch = content.match(/```(?:json)?\s*(\{[\s\S]*\})\s*```/) ||
+          content.match(/\{[\s\S]*\}/)
+        if (jsonMatch) {
+          result = JSON.parse(jsonMatch[1] || jsonMatch[0])
+        } else {
+          // Fallback: create structured response from text
+          result = {
+            errorExplanation: content,
+            reasoning: 'AI analysis completed',
+            fixedCode: 'See explanation above',
+          }
+        }
+      }
+
+      // Ensure all required fields exist
+      const debugResult = {
+        errorExplanation: result.errorExplanation || result.explanation || 'No error explanation provided',
+        reasoning: result.reasoning || result.reason || 'No reasoning provided',
+        fixedCode: result.fixedCode || result.code || result.correctedCode || 'No fixed code provided',
+      }
+
+      return NextResponse.json(debugResult)
+    } catch (aiError: any) {
       return NextResponse.json(
         {
-          error: `Failed to get response from any Gemini model.
-          
-Tried all models: ${modelNamesToTry.join(', ')}
-Last error: ${lastError?.message || 'Unknown error'}
+          error: `AI Provider Error: ${aiError.message || 'Unknown error'}
 
-Please check your API key permissions and ensure the Generative Language API is enabled.`,
+Setup Instructions:
+1. For Gemini 2.5 Flash (Recommended - Free tier available):
+   - Get API key from: https://makersuite.google.com/app/apikey
+   - Add to .env.local: GEMINI_API_KEY=your_key
+   - Set: AI_PROVIDER=gemini (or leave default)
+
+2. For Ollama (Free & Local):
+   - Install from: https://ollama.ai
+   - Run: ollama pull llama3.2:3b
+   - Set: AI_PROVIDER=ollama
+
+3. For Groq (Free API):
+   - Get API key from: https://console.groq.com
+   - Add to .env.local: GROQ_API_KEY=your_key
+   - Set: AI_PROVIDER=groq`,
         },
         { status: 500 }
       )
     }
-
-    const content = response.text()
-    if (!content) {
-      throw new Error('No response from AI')
-    }
-
-    // Parse JSON response
-    let result
-    try {
-      result = JSON.parse(content)
-    } catch (parseError) {
-      // If JSON parsing fails, try to extract JSON from markdown code blocks
-      const jsonMatch = content.match(/```(?:json)?\s*(\{[\s\S]*\})\s*```/) ||
-        content.match(/\{[\s\S]*\}/)
-      if (jsonMatch) {
-        result = JSON.parse(jsonMatch[1] || jsonMatch[0])
-      } else {
-        // Fallback: create structured response from text
-        result = {
-          errorExplanation: content,
-          reasoning: 'AI analysis completed',
-          fixedCode: 'See explanation above',
-        }
-      }
-    }
-
-    // Ensure all required fields exist
-    const debugResult = {
-      errorExplanation: result.errorExplanation || result.explanation || 'No error explanation provided',
-      reasoning: result.reasoning || result.reason || 'No reasoning provided',
-      fixedCode: result.fixedCode || result.code || result.correctedCode || 'No fixed code provided',
-    }
-
-    return NextResponse.json(debugResult)
   } catch (error: any) {
     console.error('Debug API error:', error)
 
-    // Ensure we always return JSON, never HTML
-    const errorMessage = error?.message || 'An unexpected error occurred'
-    const errorStack = process.env.NODE_ENV === 'development' ? error?.stack : undefined
-
     return NextResponse.json(
       {
-        error: errorMessage,
-        details: errorStack,
+        error: error?.message || 'An unexpected error occurred',
+        details: process.env.NODE_ENV === 'development' ? error?.stack : undefined,
       },
       {
         status: 500,

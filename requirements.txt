@@ -1,0 +1,19 @@
+# Core dependencies
+speechrecognition>=3.10.0
+pyttsx3>=2.90
+pyaudio>=0.2.14
+python-dotenv>=1.0.0  # For loading .env files
+
+# Browser automation (for clicking, searching, etc.)
+selenium>=4.15.0
+webdriver-manager>=4.0.0  # Auto-downloads browser drivers
+
+# LLM providers (install only what you need)
+requests>=2.31.0  # For Ollama
+openai>=1.0.0  # For OpenAI (optional)
+groq>=0.4.0  # For Groq (optional)
+google-generativeai>=0.3.0  # For Gemini (optional)
+
+# GUI (optional, for GUI mode)
+# tkinter is usually included with Python
+
