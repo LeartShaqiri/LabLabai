@@ -33,6 +33,7 @@ class BrowserAutomation:
             chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
             chrome_options.add_experimental_option('useAutomationExtension', False)
             
+            
             # Try to initialize Chrome with webdriver-manager
             try:
                 service = ChromeService(ChromeDriverManager().install())
